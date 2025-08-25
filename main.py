@@ -6,12 +6,24 @@ from typing import Tuple
 import math
 
 # 說明：
-# 這個檔案使用 Pygame 建立一個最簡單的敲磚塊畫面範例。
+# 這個檔案使用 Pygame 建立一個敲磚塊遊戲。
 # 目前包含：
 # - 定義一個磚塊類別 `Brick`，可繪製在畫面上並支援被擊中（消失）狀態
 # - 建立一個矩形磚塊牆（rows x cols），並使用 `gap` 參數產生方塊間的間距
-# - 簡單的主迴圈處理視窗事件與繪製
-# 注意：本範例未實作球、底板與碰撞偵測，僅示範磚塊排列與繪製
+# - 球、底板與完整的碰撞偵測系統
+# - 球加速功能：按住左Shift鍵可讓球短暫加速移動
+#
+# 操作說明：
+# - 空白鍵或右鍵：發射球
+# - 滑鼠移動：控制底板位置
+# - 左Shift鍵：按住時球會加速移動，放開時恢復正常速度
+# - R鍵：重新隨機化磚塊漸層顏色
+# - Q鍵：顯示/隱藏操作說明
+# - ESC鍵：退出遊戲
+# - 建立一個矩形磚塊牆（rows x cols），並使用 `gap` 參數產生方塊間的間距
+# - 球、底板與完整的碰撞偵測系統
+# - 球加速功能與繁體中文顯示支援
+# 注意：當所有磚塊被消除時會顯示反射定律說明與遊戲結束訊息
 
 
 ###################### 物件類別：Brick ######################
@@ -287,6 +299,12 @@ ball_attached = True
 # 操作守則顯示旗標（預設關閉，按 Q 可以切換）
 show_instructions = False
 
+# ====== 球加速功能相關變數 ======
+ball_boost_active = False  # 是否正在加速
+ball_boost_multiplier = 2.0  # 加速倍數
+ball_normal_vx = 0  # 儲存正常的 x 速度
+ball_normal_vy = 0  # 儲存正常的 y 速度
+
 
 ###################### 主程式（遊戲迴圈） ######################
 
@@ -309,6 +327,9 @@ while True:
                     # 與空白鍵相同的發射行為：左右隨機、向上
                     ball.vx = 5 * (1 if random.random() < 0.5 else -1)
                     ball.vy = -5
+                    # 初始化正常速度
+                    ball_normal_vx = ball.vx
+                    ball_normal_vy = ball.vy
         elif event.type == pygame.KEYDOWN:
             # 按 R 鍵重新隨機化漸層
             if event.key == pygame.K_r:
@@ -330,6 +351,9 @@ while True:
                     # 朝上發射，左右方向隨機
                     ball.vx = 5 * (1 if random.random() < 0.5 else -1)
                     ball.vy = -5
+                    # 初始化正常速度
+                    ball_normal_vx = ball.vx
+                    ball_normal_vy = ball.vy
             # 按 Q 顯示/隱藏操作守則
             elif event.key == pygame.K_q:
                 show_instructions = not show_instructions
@@ -395,17 +419,17 @@ while True:
             except:
                 # 最後備用：使用預設字型
                 small_font = pygame.font.Font(None, 24)
-        
+
         # 文字換行函數
         def wrap_text(text, font, max_width):
             """將文字按寬度分割成多行，支援中文"""
             lines = []
             current_line = ""
-            
+
             for char in text:
                 test_line = current_line + char
                 text_width = font.size(test_line)[0]
-                
+
                 if text_width <= max_width:
                     current_line = test_line
                 else:
@@ -416,12 +440,12 @@ while True:
                         # 單個字符就超寬，強制加入
                         lines.append(char)
                         current_line = ""
-            
+
             if current_line:
                 lines.append(current_line)
-            
+
             return lines
-        
+
         explan_texts = [
             "入射角反射角公式是反射定律，其核心是入射角（θi）等於反射角（θr），即 θi = θr。",
             "公式的意義與應用：",
@@ -431,18 +455,18 @@ while True:
             "反射定律：入射角等於反射角 (θi = θr)。",
             "折射定律（區別）：n1*sin(θ1) = n2*sin(θ2)。",
         ]
-        
+
         # 處理所有文字行，進行自動換行
         all_lines = []
         max_text_width = width - 40  # 左右各留20像素邊距
-        
+
         for text in explan_texts:
             wrapped_lines = wrap_text(text, small_font, max_text_width)
             all_lines.extend(wrapped_lines)
             # 在段落間增加空行
             if text != explan_texts[-1]:  # 最後一段不加空行
                 all_lines.append("")  # 空行
-        
+
         start_y = big_rect.bottom + 18
         line_height = 26
         for i, line in enumerate(all_lines):
@@ -494,6 +518,26 @@ while True:
         continue
 
     # ===== 球的移動與碰撞處理 =====
+
+    # 檢查加速按鍵狀態（使用 LSHIFT 左Shift鍵）
+    keys = pygame.key.get_pressed()
+    boost_key_pressed = keys[pygame.K_LSHIFT]
+
+    # 處理球加速邏輯
+    if not ball_attached:  # 只有在球不附著底板時才處理加速
+        if boost_key_pressed and not ball_boost_active:
+            # 按下加速鍵，開始加速
+            ball_boost_active = True
+            ball_normal_vx = ball.vx
+            ball_normal_vy = ball.vy
+            ball.vx *= ball_boost_multiplier
+            ball.vy *= ball_boost_multiplier
+        elif not boost_key_pressed and ball_boost_active:
+            # 放開加速鍵，恢復正常速度
+            ball_boost_active = False
+            ball.vx = ball_normal_vx
+            ball.vy = ball_normal_vy
+
     # 更新球的位置
     ball.x += ball.vx
     ball.y += ball.vy
@@ -502,14 +546,23 @@ while True:
     if ball.x - ball.radius <= 0:
         ball.x = ball.radius
         ball.vx = -ball.vx
+        # 更新正常速度
+        if ball_boost_active:
+            ball_normal_vx = -ball_normal_vx
     elif ball.x + ball.radius >= width:
         ball.x = width - ball.radius
         ball.vx = -ball.vx
+        # 更新正常速度
+        if ball_boost_active:
+            ball_normal_vx = -ball_normal_vx
 
     # 碰到上方牆壁
     if ball.y - ball.radius <= 0:
         ball.y = ball.radius
         ball.vy = -ball.vy
+        # 更新正常速度
+        if ball_boost_active:
+            ball_normal_vy = -ball_normal_vy
 
     # 碰到底部（簡單處理：重置球到底板上方）
     if ball.y - ball.radius > height:
@@ -521,6 +574,10 @@ while True:
         ball.y = paddle.y - 12
         ball.vx = 0
         ball.vy = 0
+        # 重置加速狀態
+        ball_boost_active = False
+        ball_normal_vx = 0
+        ball_normal_vy = 0
 
     # 球與半圓底板碰撞（圓形幾何 + 向量反射）
     # 計算半圓圓心：
@@ -540,8 +597,17 @@ while True:
                 n_x, n_y = nx / dist, ny / dist
             # 投影並反射速度向量
             v_dot_n = ball.vx * n_x + ball.vy * n_y
+            old_vx = ball.vx
+            old_vy = ball.vy
             ball.vx = ball.vx - 2 * v_dot_n * n_x
             ball.vy = ball.vy - 2 * v_dot_n * n_y
+
+            # 更新正常速度（如果正在加速）
+            if ball_boost_active:
+                # 計算正常速度的反射
+                normal_v_dot_n = ball_normal_vx * n_x + ball_normal_vy * n_y
+                ball_normal_vx = ball_normal_vx - 2 * normal_v_dot_n * n_x
+                ball_normal_vy = ball_normal_vy - 2 * normal_v_dot_n * n_y
             # 將球微幅推離以避免穿透
             overlap = paddle.radius + ball.radius - dist
             if overlap > 0:
@@ -561,8 +627,14 @@ while True:
                 (brick.y + brick.height / 2) - ball.y
             ):
                 ball.vx = -ball.vx
+                # 更新正常速度
+                if ball_boost_active:
+                    ball_normal_vx = -ball_normal_vx
             else:
                 ball.vy = -ball.vy
+                # 更新正常速度
+                if ball_boost_active:
+                    ball_normal_vy = -ball_normal_vy
             break
 
     # 繪製球
