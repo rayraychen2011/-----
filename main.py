@@ -3,6 +3,7 @@ import pygame
 import sys
 import random
 from typing import Tuple
+import math
 
 # 說明：
 # 這個檔案使用 Pygame 建立一個最簡單的敲磚塊畫面範例。
@@ -93,6 +94,31 @@ class Ball:
         )
 
 
+class Paddle:
+    """半圓形底板（上方為圓弧，底部為平面）
+
+    屬性：x(左上繪製用)、width(直徑)、radius、y(頂端座標)、color
+    draw(surface, x): 在指定 x 座標繪製半圓（不改變物件內 x）
+    """
+
+    def __init__(self, x, y, width, color=(240, 240, 240)):
+        self.x = int(x)
+        self.y = int(y)
+        self.width = int(width)
+        self.radius = int(self.width // 2)
+        self.color = color
+
+    def draw(self, surface, x=None):
+        draw_x = self.x if x is None else int(x)
+        cx = int(draw_x + self.width // 2)
+        cy = int(self.y + self.radius)
+        # 畫整個圓，再用背景色蓋掉下半部，留下上半圓
+        pygame.draw.circle(surface, self.color, (cx, cy), self.radius)
+        # 用背景色遮住下半圓，產生半圓效果
+        bg_rect = (draw_x, cy, self.width, self.radius)
+        pygame.draw.rect(surface, (0, 0, 0), bg_rect)
+
+
 ###################### 初始化 Pygame 與主要資源 ######################
 
 # 初始化 Pygame（啟動所有模組）
@@ -107,8 +133,17 @@ height = 600
 screen = pygame.display.set_mode((width, height))
 pygame.display.set_caption("敲磚塊遊戲")
 # 字型：用來繪製畫面上的文字（例如方塊剩餘數量）
-# 使用 None 代表預設字型，大小 28
-font = pygame.font.Font(None, 28)
+# 使用支援繁體中文的字型
+try:
+    # 嘗試使用微軟正黑體
+    font = pygame.font.SysFont("microsoftyahei", 28)
+except:
+    try:
+        # 備用：使用微軟正黑體UI
+        font = pygame.font.SysFont("microsoftyaheiui", 28)
+    except:
+        # 最後備用：使用預設字型
+        font = pygame.font.Font(None, 28)
 
 
 ###################### 磚塊牆配置（Rows x Cols） ######################
@@ -239,10 +274,8 @@ paddle_y = height - 48
 paddle_x = (width - paddle_width) // 2
 # 底板顏色（白色）
 paddle_color = (240, 240, 240)
-# 使用 Brick 類別建立底板物件（不加入 bricks 清單）
-paddle = Brick(
-    x=paddle_x, y=paddle_y, width=paddle_width, height=paddle_height, color=paddle_color
-)
+# 使用 Paddle 類別建立半圓底板物件（不加入 bricks 清單）
+paddle = Paddle(x=paddle_x, y=paddle_y, width=paddle_width, color=paddle_color)
 
 # ====== 球物件實例初始化 ======
 # 初始放在底板中點上方
@@ -311,9 +344,116 @@ while True:
 
     # 在左上角顯示方塊剩餘數量（不包含已被擊中的磚塊）
     remaining = sum(1 for b in bricks if not b.hit)
-    count_text = f"方塊剩餘: {remaining}"
+    count_text = f"{remaining}"
     text_surf = font.render(count_text, True, (255, 255, 255))
     screen.blit(text_surf, (8, 8))
+
+    # 當剩餘磚塊為 0 時，隱藏球並顯示反射定律說明與大紅字
+    if remaining == 0:
+        # 停止並隱藏球（避免看到移動）
+        try:
+            ball.vx = 0
+            ball.vy = 0
+        except Exception:
+            pass
+
+        # 繪製（若有剩餘磚塊會顯示，但理論上 remaining==0 所有磚塊都已被 hit）
+        for brick in bricks:
+            if brick.hit:
+                continue
+            brick.draw(screen)
+
+        # 大紅字（帶陰影）
+        try:
+            # 嘗試使用微軟正黑體
+            big_font = pygame.font.SysFont("microsoftyahei", 96)
+        except:
+            try:
+                # 備用：使用微軟正黑體UI
+                big_font = pygame.font.SysFont("microsoftyaheiui", 96)
+            except:
+                # 最後備用：使用預設字型
+                big_font = pygame.font.Font(None, 96)
+        big_text = "你學廢了嗎"
+        red = (220, 20, 20)
+        # 陰影先畫一層黑色偏移，再畫紅色
+        shadow = big_font.render(big_text, True, (0, 0, 0))
+        shadow_rect = shadow.get_rect(center=(width // 2 + 4, height // 2 + 4))
+        screen.blit(shadow, shadow_rect)
+        big_surf = big_font.render(big_text, True, red)
+        big_rect = big_surf.get_rect(center=(width // 2, height // 2))
+        screen.blit(big_surf, big_rect)
+
+        # 反射定律說明文字（多行，置中排列）
+        try:
+            # 嘗試使用微軟正黑體
+            small_font = pygame.font.SysFont("microsoftyahei", 24)  # 稍微縮小字體
+        except:
+            try:
+                # 備用：使用微軟正黑體UI
+                small_font = pygame.font.SysFont("microsoftyaheiui", 24)
+            except:
+                # 最後備用：使用預設字型
+                small_font = pygame.font.Font(None, 24)
+        
+        # 文字換行函數
+        def wrap_text(text, font, max_width):
+            """將文字按寬度分割成多行，支援中文"""
+            lines = []
+            current_line = ""
+            
+            for char in text:
+                test_line = current_line + char
+                text_width = font.size(test_line)[0]
+                
+                if text_width <= max_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                        current_line = char
+                    else:
+                        # 單個字符就超寬，強制加入
+                        lines.append(char)
+                        current_line = ""
+            
+            if current_line:
+                lines.append(current_line)
+            
+            return lines
+        
+        explan_texts = [
+            "入射角反射角公式是反射定律，其核心是入射角（θi）等於反射角（θr），即 θi = θr。",
+            "公式的意義與應用：",
+            "θi (入射角)：入射光線與界面法線之間的夾角。",
+            "θr (反射角)：反射光線與界面法線之間的夾角。",
+            "法線：與反射面垂直的一條假想線，在反射點上垂直於界面。",
+            "反射定律：入射角等於反射角 (θi = θr)。",
+            "折射定律（區別）：n1*sin(θ1) = n2*sin(θ2)。",
+        ]
+        
+        # 處理所有文字行，進行自動換行
+        all_lines = []
+        max_text_width = width - 40  # 左右各留20像素邊距
+        
+        for text in explan_texts:
+            wrapped_lines = wrap_text(text, small_font, max_text_width)
+            all_lines.extend(wrapped_lines)
+            # 在段落間增加空行
+            if text != explan_texts[-1]:  # 最後一段不加空行
+                all_lines.append("")  # 空行
+        
+        start_y = big_rect.bottom + 18
+        line_height = 26
+        for i, line in enumerate(all_lines):
+            if line:  # 非空行才渲染
+                surf = small_font.render(line, True, (255, 255, 255))
+                rect = surf.get_rect(center=(width // 2, start_y + i * line_height))
+                screen.blit(surf, rect)
+            # 空行也要佔用行高，但不渲染任何內容
+
+        pygame.display.update()
+        continue
 
     # 更新並繪製底板：讓底板的中心跟隨滑鼠的 x 座標，y 固定
     mouse_x, _ = pygame.mouse.get_pos()
@@ -324,8 +464,8 @@ while True:
         paddle_draw_x = 0
     elif paddle_draw_x > width - paddle.width:
         paddle_draw_x = width - paddle.width
-    # 使用 Brick.draw 的參數 x,y 來繪製移動中的底板（不修改物件本身座標）
-    paddle.draw(screen, x=paddle_draw_x, y=paddle.y)
+    # 使用 Paddle.draw 的參數 x 來繪製移動中的半圓底板（不修改物件本身座標）
+    paddle.draw(screen, x=paddle_draw_x)
 
     # 若球附著在底板上，讓球跟隨底板位置並跳過物理更新，等待空白鍵發射
     if "ball_attached" in globals() and ball_attached:
@@ -382,18 +522,31 @@ while True:
         ball.vx = 0
         ball.vy = 0
 
-    # 球與底板碰撞（使用矩形近似）
-    if (
-        ball.rect().colliderect(
-            pygame.Rect(paddle_draw_x, paddle.y, paddle.width, paddle.height)
-        )
-        and ball.vy > 0
-    ):
-        # 反轉 y 方向
-        ball.vy = -abs(ball.vy)
-        # 根據碰撞位置稍微改變 vx（讓反彈有角度）
-        offset = (ball.x - (paddle_draw_x + paddle.width / 2)) / (paddle.width / 2)
-        ball.vx += offset * 2
+    # 球與半圓底板碰撞（圓形幾何 + 向量反射）
+    # 計算半圓圓心：
+    cx = paddle_draw_x + paddle.width // 2
+    cy = paddle.y + paddle.radius
+    # 只在球向下（vy>0）時判斷碰撞
+    if ball.vy > 0:
+        nx = ball.x - cx
+        ny = ball.y - cy
+        dist = math.hypot(nx, ny)
+        # 只有當球位於半圓上方（y <= cy）或接近邊界時才視為有效碰撞
+        if dist <= (paddle.radius + ball.radius) and ball.y <= cy + 1:
+            # 法向量（從圓心指向球心）
+            if dist == 0:
+                n_x, n_y = 0.0, -1.0
+            else:
+                n_x, n_y = nx / dist, ny / dist
+            # 投影並反射速度向量
+            v_dot_n = ball.vx * n_x + ball.vy * n_y
+            ball.vx = ball.vx - 2 * v_dot_n * n_x
+            ball.vy = ball.vy - 2 * v_dot_n * n_y
+            # 將球微幅推離以避免穿透
+            overlap = paddle.radius + ball.radius - dist
+            if overlap > 0:
+                ball.x += n_x * overlap
+                ball.y += n_y * overlap
 
     # 球與磚塊碰撞：檢查每個磚塊是否碰撞，若碰撞則將磚塊設為 hit 並反轉球的 vy
     for brick in bricks:
