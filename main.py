@@ -37,6 +37,9 @@ class Brick:
         self.width = width
         self.height = height
         # 儲存顏色 (R, G, B)
+        # base_color: 原始漸層色（不隨磚塊數量變化）
+        self.base_color = color
+        # color: 實際繪製用顏色（會在每一幀可能被動態調整）
         self.color = color
         # 是否被擊中（True 表示已消失）
         self.hit = hit
@@ -188,6 +191,8 @@ def apply_gradient_to_bricks(
         rows, cols, start_color, end_color, direction
     )
     for idx, brick in enumerate(bricks_list):
+        # 保存原始漸層色為 base_color，並將當前繪製色設為相同
+        brick.base_color = gradient[idx]
         brick.color = gradient[idx]
 
 
@@ -330,7 +335,20 @@ while True:
         ball.vy = 0
         # 繪製球與磚塊，並立即更新畫面後繼續下一循環
         ball.draw(screen)
+        # 同樣在等待時也要根據剩餘磚塊數調整顏色
+        total_bricks = rows * cols
+        ratio = (
+            sum(1 for b in bricks if not b.hit) / total_bricks
+            if total_bricks > 0
+            else 0
+        )
+        t_dark = min(max(1.0 - ratio, 0.0), 1.0)
+        dark_strength = 0.9
+        t_effect = t_dark * dark_strength
         for brick in bricks:
+            if brick.hit:
+                continue
+            brick.color = lerp_color(brick.base_color, (0, 0, 0), t_effect)
             brick.draw(screen)
         pygame.display.update()
         continue
@@ -398,7 +416,22 @@ while True:
     ball.draw(screen)
 
     # 繪製所有磚塊：若某個 Brick 的 .hit 為 True，draw() 會跳過它
+    # 動態調整磚塊顏色：當剩餘磚塊越少，磚塊顏色越接近黑色（變暗）
+    total_bricks = rows * cols
+    # ratio = 剩餘 / 總數；當 ratio 越小 -> t 越大（越暗）
+    ratio = remaining / total_bricks if total_bricks > 0 else 0
+    # 轉換為插值參數 t，range 0.0 (所有磚) 到 1.0 (沒磚)
+    t_dark = min(max(1.0 - ratio, 0.0), 1.0)
+    # 可以調整 dark_strength 來控制變暗的程度（0.0 不變，1.0 完全黑）
+    dark_strength = 0.9
+
     for brick in bricks:
+        if brick.hit:
+            continue
+        # 將 base_color 線性插值到黑色
+        # 使用 t_effect = t_dark * dark_strength 來微調強度
+        t_effect = t_dark * dark_strength
+        brick.color = lerp_color(brick.base_color, (0, 0, 0), t_effect)
         brick.draw(screen)
 
     # 操作守則功能已移除
