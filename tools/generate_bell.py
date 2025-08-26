@@ -1,13 +1,19 @@
 import wave
 import math
 import struct
+import os
 
 sample_rate = 44100
 duration = 0.12
 freq = 880.0
 amplitude = 16000
 n_samples = int(sample_rate * duration)
-path = r"c:\Users\ruby5\OneDrive\桌面\敲磚塊遊戲\bell.wav"
+
+# 取得專案根目錄
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+path = os.path.join(project_root, "assets", "sounds", "bell.wav")
+
 with wave.open(path, "w") as wf:
     wf.setnchannels(1)
     wf.setsampwidth(2)
