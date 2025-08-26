@@ -4,6 +4,7 @@ import sys
 import random
 from typing import Tuple
 import math
+import colorsys
 
 # 說明：
 # 這個檔案使用 Pygame 建立一個敲磚塊遊戲。
@@ -484,18 +485,38 @@ def increase_contrast(
     return (r, g, b)
 
 
-def shift_towards_cool(
+def shift_towards_complement(
     color: Tuple[int, int, int], t: float, strength: float = 0.9
 ) -> Tuple[int, int, int]:
-    """將顏色朝冷色系偏移。
+    """將顏色朝其互補色偏移。
 
-    參數 t (0.0-1.0) 表示基礎強度，strength 用來調整最終插值幅度。
-    目標冷色我選擇為淡藍-青調 (100, 160, 240)。
-    實作為線性插值：lerp(color, cool_target, t * strength)
+    使用 HSV 色彩空間來計算互補色：將色相 (h) 加上 0.5 (等於 180 度)，
+    保留原本的飽和度與明度 (s, v)。之後在原色與互補色之間做線性插值。
+
+    參數 t (0.0-1.0) 為基礎強度，strength 調整最終插值幅度。
     """
-    cool_target = (100, 160, 240)
+    # guard t 範圍
     tt = min(max(float(t) * float(strength), 0.0), 1.0)
-    return lerp_color(color, cool_target, tt)
+
+    # 轉換到 0..1 範圍並使用 colorsys
+    r_f = color[0] / 255.0
+    g_f = color[1] / 255.0
+    b_f = color[2] / 255.0
+    try:
+        h, s, v = colorsys.rgb_to_hsv(r_f, g_f, b_f)
+    except Exception:
+        # 若轉換失敗，直接回傳原色
+        return color
+
+    comp_h = (h + 0.5) % 1.0
+    cr_f, cg_f, cb_f = colorsys.hsv_to_rgb(comp_h, s, v)
+    comp_color = (
+        int(round(cr_f * 255)),
+        int(round(cg_f * 255)),
+        int(round(cb_f * 255)),
+    )
+
+    return lerp_color(color, comp_color, tt)
 
 
 def random_color(min_v=30, max_v=225) -> Tuple[int, int, int]:
@@ -618,6 +639,13 @@ paddle_color = (255, 220, 60)
 # 使用 Paddle 類別建立半圓底板物件（不加入 bricks 清單）
 paddle = Paddle(x=paddle_x, y=paddle_y, width=paddle_width, color=paddle_color)
 
+# 平滑底板位置（實際繪製用），初始化為起始位置
+paddle_pos_x = float(paddle_x)
+
+# 平滑移動參數：每幀最大位移（像素），與插值係數（0-1）
+PADDLE_MAX_STEP = 18.0
+PADDLE_LERP = 0.28
+
 # 用於儲存底板邊緣反彈的視覺效果（短暫高亮）
 paddle_edge_effects = []
 
@@ -675,9 +703,259 @@ show_physics = False
 
 # ====== 球加速功能相關變數 ======
 ball_boost_active = False  # 是否正在加速
-ball_boost_multiplier = 2.0  # 加速倍數
+ball_boost_multiplier = 5.0  # 加速倍數（使用者要求：五倍加速）
 ball_normal_vx = 0  # 儲存正常的 x 速度
 ball_normal_vy = 0  # 儲存正常的 y 速度
+# 底板自動模式（按左鍵啟用，永久）
+paddle_auto_mode = False
+
+
+def predict_ball_landing_x(
+    ball, bricks, width, height, paddle, start_paddle_x, max_iter=2000, step=6
+):
+    """模擬球的未來運動並回傳預計第一次碰到底板（paddle.y）時的 x 座標（球心位置）。
+
+    此函式會考慮牆壁與磚塊碰撞，模擬到球向下並到達底板 y 座標時回傳 x。
+    若模擬中球落出畫面底部或超過 iter 則回傳 None。
+    """
+    # 複製狀態
+    x = float(ball.x)
+    y = float(ball.y)
+    vx = float(ball.vx)
+    vy = float(ball.vy)
+    r = int(ball.radius * getattr(ball, "_powerup_scale", 1.0))
+
+    if vx == 0 and vy == 0:
+        return None
+
+    # 準備磚塊矩形快取
+    brick_rects = [
+        (i, pygame.Rect(b.x, b.y, b.width, b.height))
+        for i, b in enumerate(bricks)
+        if not b.hit
+    ]
+
+    it = 0
+    bounces = 0
+    while it < max_iter:
+        it += 1
+        speed = math.hypot(vx, vy)
+        if speed == 0:
+            break
+        steps = max(1, int(math.ceil(speed / step)))
+        dx = vx / steps
+        dy = vy / steps
+        for s in range(steps):
+            x += dx
+            y += dy
+
+            # 牆壁碰撞
+            if x - r <= 0:
+                x = r
+                vx = -vx
+                bounces += 1
+                continue
+            elif x + r >= width:
+                x = width - r
+                vx = -vx
+                bounces += 1
+                continue
+            if y - r <= 0:
+                y = r
+                vy = -vy
+                bounces += 1
+                continue
+
+            # 若球到達或超過底板 y（球往下）就回傳當前 x
+            # 使用 paddle.y 作為接收高度參考（球心到達此 y 表示會被底板接住）
+            if vy > 0 and y + r >= paddle.y:
+                return int(x)
+
+            # 磚塊碰撞（簡單矩形相交判定）
+            ball_future_rect = pygame.Rect(
+                int(x - r), int(y - r), int(2 * r), int(2 * r)
+            )
+            hit_rect = None
+            for idx, rect in brick_rects:
+                if ball_future_rect.colliderect(rect):
+                    hit_rect = rect
+                    break
+            if hit_rect is not None:
+                # 根據與磚塊中心相對位置反轉主要分量
+                cx = hit_rect.centerx
+                cy = hit_rect.centery
+                if abs(cx - x) > abs(cy - y):
+                    vx = -vx
+                else:
+                    vy = -vy
+                bounces += 1
+                # 碰到磚塊後繼續模擬
+                continue
+
+            # 若球直接落出畫面底部，視為無法接住
+            if y - r > height:
+                return None
+
+    return None
+
+
+def aim_ball_at_brick(ball, bricks_list, prefer_above_y=None, speed=None):
+    """讓球朝向一個尚未被擊中的磚塊中心。
+
+    - prefer_above_y: 若提供，會優先選擇 y < prefer_above_y 的磚塊（通常是底板 y），
+      以確保球朝上方飛行擊中磚塊。
+    - speed: 若提供，使用此速度大小（像素/帧），否則使用球當前速度大小或預設 6.
+    回傳 True 表示有選中並調整速度，False 則表示未調整（沒有可用磚塊）。
+    """
+    # 選出還沒被 hit 的磚塊
+    candidates = [b for b in bricks_list if not b.hit]
+    if not candidates:
+        return False
+
+    # 優先考量在 prefer_above_y 之上的磚塊
+    if prefer_above_y is not None:
+        above = [b for b in candidates if (b.y + b.height / 2.0) < prefer_above_y]
+        if above:
+            candidates = above
+
+    # 選擇最靠近球心的磚塊中心作為目標（簡單又穩定）
+    best = None
+    best_dist = None
+    for b in candidates:
+        bx = b.x + b.width / 2.0
+        by = b.y + b.height / 2.0
+        d = math.hypot(bx - ball.x, by - ball.y)
+        if best is None or d < best_dist:
+            best = (bx, by)
+            best_dist = d
+
+    if best is None:
+        return False
+
+    tx, ty = best
+    # 計算方向向量
+    dx = float(tx - ball.x)
+    dy = float(ty - ball.y)
+    # 若目標在球下方，強制把目標 y 設為在球上方一點，避免朝下直接出界
+    if prefer_above_y is not None and ty >= prefer_above_y:
+        dy = min(dy, -abs(dy) - 1.0)
+
+    mag = math.hypot(dx, dy)
+    if mag == 0:
+        return False
+
+    # 決定速度大小
+    if speed is None:
+        cur_speed = math.hypot(float(ball.vx), float(ball.vy))
+        if cur_speed <= 0.001:
+            cur_speed = 6.0
+    else:
+        cur_speed = float(speed)
+
+    nx = dx / mag
+    ny = dy / mag
+    ball.vx = nx * cur_speed
+    ball.vy = ny * cur_speed
+
+    # 若有儲存正常速度的變數（用於 boost 還原），同步更新
+    try:
+        globals()["ball_normal_vx"] = ball.vx
+        globals()["ball_normal_vy"] = ball.vy
+    except Exception:
+        pass
+
+    return True
+
+
+def predict_landing_x_trajectory(
+    ball,
+    bricks,
+    width,
+    height,
+    paddle,
+    paddle_draw_x,
+    max_bounces=12,
+    step=6,
+    max_iter=3000,
+):
+    """使用步進模擬球的未來運動並回傳球第一次接觸到底板高度時的 x 座標（球心）。
+
+    這個函式複製並簡化了畫面內軌跡模擬的邏輯，專門回傳落點 x，供自動底板使用。
+    若模擬中球落出畫面底部或超過最大步數則回傳 None。
+    """
+    x = float(ball.x)
+    y = float(ball.y)
+    vx = float(ball.vx)
+    vy = float(ball.vy)
+    r = int(ball.radius * getattr(ball, "_powerup_scale", 1.0))
+
+    if vx == 0 and vy == 0:
+        return None
+
+    # 建立未被擊中的磚塊快取
+    brick_rects = [
+        pygame.Rect(b.x, b.y, b.width, b.height) for b in bricks if not b.hit
+    ]
+
+    it = 0
+    bounces = 0
+    while it < max_iter and bounces <= max_bounces:
+        it += 1
+        speed = math.hypot(vx, vy)
+        if speed == 0:
+            break
+        steps = max(1, int(math.ceil(speed / step)))
+        dx = vx / steps
+        dy = vy / steps
+        for s in range(steps):
+            x += dx
+            y += dy
+
+            # 牆壁碰撞
+            if x - r <= 0:
+                x = r
+                vx = -vx
+                bounces += 1
+                continue
+            elif x + r >= width:
+                x = width - r
+                vx = -vx
+                bounces += 1
+                continue
+            if y - r <= 0:
+                y = r
+                vy = -vy
+                bounces += 1
+                continue
+
+            # 若球往下且到達或超過底板 y，回傳當前 x
+            if vy > 0 and y + r >= paddle.y:
+                return int(x)
+
+            # 磚塊碰撞檢查
+            ball_future_rect = pygame.Rect(
+                int(x - r), int(y - r), int(2 * r), int(2 * r)
+            )
+            hit = None
+            for rect in brick_rects:
+                if ball_future_rect.colliderect(rect):
+                    hit = rect
+                    break
+            if hit is not None:
+                cx = hit.centerx
+                cy = hit.centery
+                if abs(cx - x) > abs(cy - y):
+                    vx = -vx
+                else:
+                    vy = -vy
+                bounces += 1
+                continue
+
+            # 若球已經落出畫面底部
+            if y - r > height:
+                return None
+
+    return None
 
 
 ###################### 主程式（遊戲迴圈） ######################
@@ -704,6 +982,23 @@ while True:
                     # 初始化正常速度
                     ball_normal_vx = ball.vx
                     ball_normal_vy = ball.vy
+                    # 若為自動模式，調整速度朝向未被擊中的磚塊
+                    try:
+                        if paddle_auto_mode:
+                            aim_ball_at_brick(ball, bricks, prefer_above_y=paddle.y)
+                    except Exception:
+                        pass
+            elif event.button == 1:
+                # 左鍵：切換底板自動模式（toggle）
+                try:
+                    paddle_auto_mode = not paddle_auto_mode
+                    if paddle_auto_mode:
+                        print("[INFO] Paddle auto mode enabled")
+                    else:
+                        print("[INFO] Paddle auto mode disabled")
+                except Exception:
+                    paddle_auto_mode = True
+                    print("[INFO] Paddle auto mode enabled")
             elif event.button == 2:
                 # 中鍵：切換物理計算面板顯示
                 if "show_physics" in globals():
@@ -732,6 +1027,12 @@ while True:
                     # 初始化正常速度
                     ball_normal_vx = ball.vx
                     ball_normal_vy = ball.vy
+                    # 若為自動模式，讓球朝向未被擊中的磚塊
+                    try:
+                        if paddle_auto_mode:
+                            aim_ball_at_brick(ball, bricks, prefer_above_y=paddle.y)
+                    except Exception:
+                        pass
             # 按 Q 顯示/隱藏操作守則
             elif event.key == pygame.K_q:
                 show_instructions = not show_instructions
@@ -750,13 +1051,111 @@ while True:
     else:
         screen.fill((0, 0, 0))  # 使用黑色背景
 
-    # 在左上角顯示方塊剩餘數量（不包含已被擊中的磚塊）
+    # 在左上角顯示方塊剩餘數量（數字置於圓圈中央）
     remaining = sum(1 for b in bricks if not b.hit)
     count_text = f"{remaining}"
+    # 可調整的圓圈與文字設定
+    circle_margin_left = 8
+    circle_margin_top = 8
+    circle_fill_color = (30, 40, 60)  # 圓圈填色，可改
+    circle_border_color = (255, 255, 255)  # 邊框顏色
+    circle_border_w = 3
+
+    # 先渲染文字以取得尺寸，之後把文字置中在圓圈
     text_surf = font.render(count_text, True, (255, 255, 255))
-    screen.blit(text_surf, (8, 8))
+    try:
+        # 計算圓半徑，確保文字可以放入圓中（帶一點內距 padding）
+        padding = 8
+        text_w = text_surf.get_width()
+        text_h = text_surf.get_height()
+        # 半徑至少要容納文字寬度/高度的一半，再加上 padding
+        circle_radius = max(16, int(max(text_w, text_h) // 2 + padding))
+
+        # 中心座標（左上角 margin + 半徑）
+        cx = circle_margin_left + circle_radius
+        cy = circle_margin_top + circle_radius
+
+        # 畫圓（填色 + 邊框）並把文字置中
+        try:
+            # 光暈（glow）設定：建立一個透明 surface，畫多層半透明圓再用加色混合疊回主畫面
+            glow_color = (100, 160, 255)  # 光暈顏色（可調）
+            glow_layers = 10
+            glow_strength = 0.9
+            # glow surface 大小：以圓半徑為基準放大
+            glow_pad = max(8, int(circle_radius * 1.8))
+            glow_surf_size = circle_radius * 2 + glow_pad * 2
+            try:
+                glow_surf = pygame.Surface(
+                    (glow_surf_size, glow_surf_size), pygame.SRCALPHA
+                )
+                gx = glow_surf_size // 2
+                gy = glow_surf_size // 2
+                for i in range(glow_layers, 0, -1):
+                    t = i / float(glow_layers)
+                    r = int(circle_radius + (1.0 - t) * circle_radius * 1.6)
+                    alpha = int(180 * (t ** (0.8 / max(0.01, glow_strength))))
+                    try:
+                        pygame.draw.circle(
+                            glow_surf,
+                            (glow_color[0], glow_color[1], glow_color[2], alpha),
+                            (gx, gy),
+                            r,
+                        )
+                    except Exception:
+                        pass
+                # 使用加色混合疊回主畫面以產生輕微發光效果
+                try:
+                    screen.blit(
+                        glow_surf,
+                        (cx - gx, cy - gy),
+                        special_flags=pygame.BLEND_RGBA_ADD,
+                    )
+                except Exception:
+                    # fallback: 直接 blit
+                    screen.blit(glow_surf, (cx - gx, cy - gy))
+            except Exception:
+                pass
+
+            # 畫實心圓、邊框與文字（置中）
+            pygame.draw.circle(screen, circle_fill_color, (cx, cy), circle_radius)
+            pygame.draw.circle(
+                screen, circle_border_color, (cx, cy), circle_radius, circle_border_w
+            )
+            txt_rect = text_surf.get_rect(center=(cx, cy))
+            screen.blit(text_surf, txt_rect)
+        except Exception:
+            # 若繪製圓失敗則 fallback 為直接繪製文字
+            screen.blit(text_surf, (circle_margin_left, circle_margin_top))
+    except Exception:
+        # 最後回退：如果任何步驟失敗，簡單繪製文字在左上角
+        try:
+            screen.blit(text_surf, (8, 8))
+        except Exception:
+            pass
 
     # 右上角顯示物理公式與計算（按 M 切換）
+    # 右上角顯示底板自動模式狀態（Auto: ON/OFF）
+    try:
+        auto_text = "Auto: ON" if paddle_auto_mode else "Auto: OFF"
+        auto_color = (120, 255, 140) if paddle_auto_mode else (200, 80, 80)
+        auto_surf = font.render(auto_text, True, auto_color)
+        pad = 8
+        box_w = auto_surf.get_width() + pad * 2
+        box_h = auto_surf.get_height() + pad * 2
+        box_surf = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        try:
+            pygame.draw.rect(
+                box_surf, (10, 12, 20, 190), (0, 0, box_w, box_h), border_radius=8
+            )
+        except Exception:
+            box_surf.fill((10, 12, 20, 190))
+        # 畫文字於 box 內
+        box_surf.blit(auto_surf, (pad, pad))
+        box_rect = box_surf.get_rect()
+        box_rect.topright = (width - 8, 8)
+        screen.blit(box_surf, box_rect)
+    except Exception:
+        pass
     if "show_physics" in globals() and show_physics:
         try:
             # 計算速度大小與分量
@@ -924,13 +1323,48 @@ while True:
     mouse_x, _ = pygame.mouse.get_pos()
     # 將滑鼠 x 轉換成底板左上角 x（讓滑鼠位於底板中點）
     paddle_draw_x = int(mouse_x - paddle.width / 2)
+    # 若啟用自動模式且球不附著，嘗試預測球落點並讓底板移動到該位置
+    if paddle_auto_mode and not ball_attached:
+        try:
+            # 優先使用基於軌跡的模擬預測落點，若失敗則 fallback 到舊的預測函式
+            landing_x = predict_landing_x_trajectory(
+                ball, bricks, width, height, paddle, paddle_draw_x
+            )
+            if landing_x is None:
+                landing_x = predict_ball_landing_x(
+                    ball, bricks, width, height, paddle, paddle_draw_x
+                )
+            if landing_x is not None:
+                # 將底板中心放在 landing_x，轉為左上角 x
+                paddle_draw_x = int(landing_x - paddle.width / 2)
+        except Exception:
+            pass
     # 限制底板不超出畫面
     if paddle_draw_x < 0:
         paddle_draw_x = 0
     elif paddle_draw_x > width - paddle.width:
         paddle_draw_x = width - paddle.width
+    # 平滑移動：將顯示位置 paddle_pos_x 緩慢移向目標 paddle_draw_x
+    try:
+        # 計算差距
+        diff = float(paddle_draw_x) - float(paddle_pos_x)
+        # 限制每幀最大移動距離
+        if abs(diff) > PADDLE_MAX_STEP:
+            step = PADDLE_MAX_STEP if diff > 0 else -PADDLE_MAX_STEP
+            paddle_pos_x += step
+        else:
+            # 使用簡單線性內插以產生平滑感
+            paddle_pos_x = paddle_pos_x + diff * PADDLE_LERP
+        # 確保邊界
+        if paddle_pos_x < 0:
+            paddle_pos_x = 0.0
+        elif paddle_pos_x > width - paddle.width:
+            paddle_pos_x = float(width - paddle.width)
+    except Exception:
+        paddle_pos_x = float(paddle_draw_x)
+
     # 使用 Paddle.draw 的參數 x 來繪製移動中的半圓底板（不修改物件本身座標）
-    paddle.draw(screen, x=paddle_draw_x)
+    paddle.draw(screen, x=int(paddle_pos_x))
 
     # 若球附著在底板上，讓球跟隨底板位置並跳過物理更新，等待空白鍵發射
     if "ball_attached" in globals() and ball_attached:
@@ -954,8 +1388,10 @@ while True:
         for brick in bricks:
             if brick.hit:
                 continue
-            # 依 t_effect 與 vivid_strength 將色系偏向冷色
-            brick.color = shift_towards_cool(brick.base_color, t_vivid, vivid_strength)
+            # 依 t_effect 與 vivid_strength 將色系偏向互補色
+            brick.color = shift_towards_complement(
+                brick.base_color, t_vivid, vivid_strength
+            )
             brick.draw(screen)
         pygame.display.update()
         continue
@@ -1015,18 +1451,32 @@ while True:
 
     # 碰到底部（簡單處理：重置球到底板上方）
     if ball.y - ball.radius > height:
-        # 重置磚牆
-        reset_bricks()
-        # 將球附著到底板，等待玩家按空白鍵發射
-        ball_attached = True
-        ball.x = paddle_draw_x + paddle.width // 2
-        ball.y = paddle.y - ball.radius
-        ball.vx = 0
-        ball.vy = 0
-        # 重置加速狀態
-        ball_boost_active = False
-        ball_normal_vx = 0
-        ball_normal_vy = 0
+        if paddle_auto_mode:
+            # 自動模式：不要重來，直接讓球反彈回來（模擬被底板成功接住）
+            try:
+                # 將球移回畫面內並反向 y 速度
+                ball.y = height - ball.radius - 1
+                ball.vy = -abs(ball.vy) if ball.vy != 0 else -5
+                # 嘗試微調 x 使球位於畫面內
+                if ball.x < ball.radius:
+                    ball.x = ball.radius + 2
+                elif ball.x > width - ball.radius:
+                    ball.x = width - ball.radius - 2
+            except Exception:
+                pass
+        else:
+            # 重置磚牆
+            reset_bricks()
+            # 將球附著到底板，等待玩家按空白鍵發射
+            ball_attached = True
+            ball.x = paddle_draw_x + paddle.width // 2
+            ball.y = paddle.y - ball.radius
+            ball.vx = 0
+            ball.vy = 0
+            # 重置加速狀態
+            ball_boost_active = False
+            ball_normal_vx = 0
+            ball_normal_vy = 0
 
     # 球與馬蹄鐵底板碰撞：左右豎柱 (rect) 與底部半圓 (circle)
     if ball.vy > 0:
@@ -1075,6 +1525,12 @@ while True:
                 did = _do_reflect(nx, ny)
                 if did:
                     collided = True
+                    # 若啟用自動模式，反射後重新瞄準磚塊
+                    try:
+                        if paddle_auto_mode:
+                            aim_ball_at_brick(ball, bricks, prefer_above_y=paddle.y)
+                    except Exception:
+                        pass
                 # 推開球以避免穿透
                 overlap = ball.radius - dist
                 if overlap > 0:
@@ -1613,8 +2069,10 @@ while True:
     for brick in bricks:
         if brick.hit:
             continue
-        # 根據 t_vivid 與 vivid_strength 將色系偏向冷色
-        brick.color = shift_towards_cool(brick.base_color, t_vivid, vivid_strength)
+        # 根據 t_vivid 與 vivid_strength 將色系偏向互補色
+        brick.color = shift_towards_complement(
+            brick.base_color, t_vivid, vivid_strength
+        )
         brick.draw(screen)
 
     # 操作守則功能已移除
